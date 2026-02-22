@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.Context
 import android.annotation.SuppressLint
 import android.content.Intent
+import java.net.URLDecoder
 import android.content.pm.PackageManager
 import android.content.pm.ResolveInfo
 import android.graphics.drawable.Drawable
@@ -127,6 +128,14 @@ fun PaypassScreen(onNavigateToSettings: () -> Unit) {
     val scope = rememberCoroutineScope()
     
     val cameraPermissionState = rememberPermissionState(Manifest.permission.CAMERA)
+    
+    // CameraProvider state for clean handover
+    var cameraProvider by remember { mutableStateOf<ProcessCameraProvider?>(null) }
+    val cameraProviderFuture = remember { ProcessCameraProvider.getInstance(context) }
+    
+    LaunchedEffect(cameraProviderFuture) {
+        cameraProvider = cameraProviderFuture.get()
+    }
 
     var selectedAppPackage by remember { mutableStateOf<String?>(null) }
     var isScanningLocked by remember { mutableStateOf(false) }
@@ -159,46 +168,63 @@ fun PaypassScreen(onNavigateToSettings: () -> Unit) {
     }
     
     // Reusable UPI handoff logic
-    val handleUpiContent: (String) -> Unit = { qrContent ->
+    val handleUpiScan: (String) -> Unit = { scannedResult ->
         if (!isScanningLocked) {
-            if (qrContent.startsWith("upi://")) {
-                isScanningLocked = true
-                val sanitizedUri = try {
-                    val parsed = Uri.parse(qrContent)
-                    val builder = Uri.Builder()
-                        .scheme(parsed.scheme)
-                        .authority(parsed.authority)
-                        .path(parsed.path)
-                    parsed.queryParameterNames.forEach { key ->
-                        parsed.getQueryParameter(key)?.let { value ->
-                            builder.appendQueryParameter(key, value)
-                        }
-                    }
-                    builder.build()
+            try {
+                // 1. RAW DECODING: Fixes the "Receiver Not Available" error
+                // Changes 'pa=user%40oksbi' back to 'pa=user@oksbi'
+                val decodedString = try {
+                    URLDecoder.decode(scannedResult, "UTF-8")
                 } catch (e: Exception) {
-                    Uri.parse(qrContent)
+                    scannedResult
                 }
-                lastScannedUpi = sanitizedUri.toString()
-                Log.d("Paypass", "Scanned UPI: $sanitizedUri")
-                selectedAppPackage?.let { targetPackage ->
+                
+                if (decodedString.startsWith("upi://")) {
+                    isScanningLocked = true
+                    val uri = Uri.parse(decodedString)
+                    
+                    lastScannedUpi = decodedString
+                    Log.d("Paypass", "Scanned UPI: $decodedString")
+                    
+                    val targetPackage = selectedAppPackage ?: "com.google.android.apps.nbu.paisa.user" // Fallback to GPay
+                    
                     try {
-                        val launchIntent = Intent(Intent.ACTION_VIEW).apply {
-                            data = sanitizedUri
+                        val launchIntent = Intent(Intent.ACTION_VIEW, uri).apply {
                             setPackage(targetPackage)
-                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            
+                            // 3. SECURITY FLAGS: Matches the Google System Scanner behavior
+                            // flag 0x6000000 = CLEAR_TOP | SINGLE_TOP
+                            flags = Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
+                            
+                            // 4. THE TRUST HEADER: Crucial for P2P (Friend QRs)
+                            // GPay blocks P2P intents that don't declare a Referrer.
+                            putExtra(Intent.EXTRA_REFERRER, Uri.parse("android-app://${context.packageName}"))
+                            
+                            // Keep compatibility with non-GPay apps if needed
+                            if (targetPackage != "com.google.android.apps.nbu.paisa.user") {
+                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            }
                         }
+                        
+                        // 5. LIFECYCLE MANAGEMENT: Fixes "BufferQueue abandoned"
+                        // Stop the scanner/analyzer but DO NOT call finish() or destroy the activity.
+                        cameraProvider?.unbindAll()
                         context.startActivity(launchIntent)
+                        
                     } catch (e: Exception) {
                         Log.e("Paypass", "Failed to launch app: $targetPackage", e)
-                        displayErrorToast = "Failed to launch $targetPackage. Try another app."
+                        // Fallback fallback: Launcher chooser
+                        val chooser = Intent.createChooser(Intent(Intent.ACTION_VIEW, uri), "Pay with")
+                        context.startActivity(chooser)
                         isScanningLocked = false
                     }
-                } ?: run {
-                    displayErrorToast = "No UPI app selected"
+                } else {
+                    displayErrorToast = "Not a UPI QR code!"
+                    isScanningLocked = true
                 }
-            } else {
-                isScanningLocked = true
-                displayErrorToast = "Not a UPI QR code!"
+            } catch (e: Exception) {
+                Log.e("Paypass", "Error processing scan", e)
+                displayErrorToast = "Scan error"
             }
         }
     }
@@ -218,7 +244,7 @@ fun PaypassScreen(onNavigateToSettings: () -> Unit) {
                     .addOnSuccessListener { barcodes ->
                         if (barcodes.isNotEmpty()) {
                             barcodes.firstOrNull()?.rawValue?.let { value ->
-                                handleUpiContent(value)
+                                handleUpiScan(value)
                             } ?: run {
                                 displayErrorToast = "Could not read QR code from image"
                             }
@@ -281,7 +307,8 @@ fun PaypassScreen(onNavigateToSettings: () -> Unit) {
         ) {
             if (cameraPermissionState.status.isGranted) {
                 CameraPreviewScreen(
-                    onQrCodeScanned = { qrContent -> handleUpiContent(qrContent) },
+                    cameraProvider = cameraProvider,
+                    onQrCodeScanned = { qrContent -> handleUpiScan(qrContent) },
                     onQrCodeLost = {
                         // Move-Away Reset: Unlock the UI when QR code leaves the frame
                         isScanningLocked = false
@@ -362,10 +389,14 @@ fun PaypassScreen(onNavigateToSettings: () -> Unit) {
 }
 
 @Composable
-fun CameraPreviewScreen(onQrCodeScanned: (String) -> Unit, onQrCodeLost: () -> Unit) {
+fun CameraPreviewScreen(
+    cameraProvider: ProcessCameraProvider?,
+    onQrCodeScanned: (String) -> Unit,
+    onQrCodeLost: () -> Unit
+) {
     val lifecycleOwner = LocalLifecycleOwner.current
     val context = LocalContext.current
-    val cameraProviderFuture = remember { ProcessCameraProvider.getInstance(context) }
+    // No longer management here solely, passed from parent for unbinding logic
     
     AndroidView(
         factory = { ctx ->
@@ -373,8 +404,8 @@ fun CameraPreviewScreen(onQrCodeScanned: (String) -> Unit, onQrCodeLost: () -> U
             val executor = ContextCompat.getMainExecutor(ctx)
             val analysisExecutor = Executors.newSingleThreadExecutor()
             
-            cameraProviderFuture.addListener({
-                val cameraProvider = cameraProviderFuture.get()
+            // Re-bind whenever cameraProvider is available
+            if (cameraProvider != null) {
                 val preview = Preview.Builder().build().also {
                     it.setSurfaceProvider(previewView.surfaceProvider)
                 }
@@ -398,9 +429,40 @@ fun CameraPreviewScreen(onQrCodeScanned: (String) -> Unit, onQrCodeLost: () -> U
                 } catch (e: Exception) {
                     Log.e("CameraPreview", "Use case binding failed", e)
                 }
-            }, executor)
+            }
             
             previewView
+        },
+        update = { previewView ->
+            // Handle updates if cameraProvider changes or comes online later
+            if (cameraProvider != null) {
+                val executor = ContextCompat.getMainExecutor(context)
+                val analysisExecutor = Executors.newSingleThreadExecutor()
+                
+                val preview = Preview.Builder().build().also {
+                    it.setSurfaceProvider(previewView.surfaceProvider)
+                }
+                
+                val imageAnalysis = ImageAnalysis.Builder()
+                    .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                    .build()
+                
+                imageAnalysis.setAnalyzer(analysisExecutor, QrCodeAnalyzer(onQrCodeScanned, onQrCodeLost))
+                
+                val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
+                
+                try {
+                    cameraProvider.unbindAll()
+                    cameraProvider.bindToLifecycle(
+                        lifecycleOwner,
+                        cameraSelector,
+                        preview,
+                        imageAnalysis
+                    )
+                } catch (e: Exception) {
+                    Log.e("CameraPreview", "Update: Use case binding failed", e)
+                }
+            }
         },
         modifier = Modifier.fillMaxSize()
     )
