@@ -5,11 +5,21 @@
     <uses-permission android:name="android.permission.CAMERA" />
 
     <queries>
+        <package android:name="com.google.android.apps.nbu.paisa.user" />
+        <package android:name="com.phonepe.app" />
+        <package android:name="net.one97.paytm" />
+        <package android:name="in.org.npci.upiapp" />
+        <package android:name="com.freecharge.android" />
+        <package android:name="com.mobikwik_new" />
+        <package android:name="com.amazon.mShop.android.shopping" />
+        <package android:name="com.whatsapp" />
+        <package android:name="com.msf.kbank.mobile" />
+        <package android:name="com.dreamplug.androidapp" />
+        
         <intent>
             <action android:name="android.intent.action.VIEW" />
             <data android:scheme="upi" android:host="pay" />
         </intent>
-        <!-- Also catch general upi:// -->
         <intent>
             <action android:name="android.intent.action.VIEW" />
             <data android:scheme="upi" />
