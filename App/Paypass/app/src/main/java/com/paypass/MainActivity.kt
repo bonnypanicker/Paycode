@@ -163,14 +163,20 @@ fun PaypassScreen(onNavigateToSettings: () -> Unit) {
         if (!isScanningLocked) {
             if (qrContent.startsWith("upi://")) {
                 isScanningLocked = true
-                val upiUri = Uri.parse(qrContent)
-                lastScannedUpi = upiUri.toString()
-                Log.d("Paypass", "Scanned UPI: $upiUri")
+                val uri = Uri.parse(qrContent)
+                val fixedUri = if (!uri.queryParameterNames.contains("cu")) {
+                    uri.buildUpon()
+                        .appendQueryParameter("cu", "INR")
+                        .build()
+                } else uri
+                
+                lastScannedUpi = fixedUri.toString()
+                Log.d("Paypass", "Scanned UPI: $fixedUri")
                 
                 selectedAppPackage?.let { targetPackage ->
                     try {
                         val launchIntent = Intent(Intent.ACTION_VIEW).apply {
-                            data = upiUri
+                            data = fixedUri
                             addCategory(Intent.CATEGORY_BROWSABLE)
                             setPackage(targetPackage)
                             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
