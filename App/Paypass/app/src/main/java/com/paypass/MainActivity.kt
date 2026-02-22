@@ -70,6 +70,17 @@ import androidx.compose.material3.RadioButton
 import androidx.compose.ui.res.painterResource
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.BlendMode
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.text.font.FontWeight
 
 // Extension property for DataStore
 val Context.dataStore: DataStore<Preferences> by preferencesDataStore(name = "settings")
@@ -292,24 +303,14 @@ fun PaypassScreen(onNavigateToSettings: () -> Unit) {
                 }
             }
             
-            if (isScanningLocked && lastScannedUpi != null) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .background(Color.Black.copy(alpha = 0.5f)),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        text = "Processing Payment...",
-                        color = Color.White,
-                        fontSize = 20.sp
-                    )
-                }
-            }
+            // Scanner Frame Overlay
+            ScannerFrameOverlay(
+                onGalleryClick = { galleryLauncher.launch("image/*") },
+                isProcessing = isScanningLocked && lastScannedUpi != null
+            )
             
-            // Icon Overlays — extracted into stable composables
+            // Settings icon at top-right
             SettingsIconButton(onClick = onNavigateToSettings)
-            GalleryIconButton(onClick = { galleryLauncher.launch("image/*") })
         }
         
         // Bottom 20%: App Selection Strip
@@ -529,27 +530,137 @@ fun SettingsIconButton(onClick: () -> Unit) {
     }
 }
 
-// Extracted into its own composable to prevent recomposition from affecting CameraX
+// Scanner frame overlay with corner brackets, text, and gallery button
 @Composable
-fun GalleryIconButton(onClick: () -> Unit) {
+fun ScannerFrameOverlay(onGalleryClick: () -> Unit, isProcessing: Boolean) {
+    val accentGreen = Color(0xFF00E676) // Accented green
     val galleryPainter = painterResource(id = R.drawable.ic_gallery)
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(16.dp),
-        contentAlignment = Alignment.TopStart
-    ) {
-        IconButton(
-            onClick = onClick,
-            modifier = Modifier
-                .size(48.dp)
-                .background(Color.Black.copy(alpha = 0.4f), shape = CircleShape)
-        ) {
-            Icon(
-                painter = galleryPainter,
-                contentDescription = "Upload from Gallery",
-                tint = Color.White
+
+    Box(modifier = Modifier.fillMaxSize()) {
+        // Dark overlay with clear window cutout
+        Canvas(modifier = Modifier.fillMaxSize().graphicsLayer(alpha = 0.99f)) {
+            val canvasW = size.width
+            val canvasH = size.height
+
+            // Scanner window: big, centered
+            val windowSize = canvasW * 0.72f
+            val windowLeft = (canvasW - windowSize) / 2f
+            val windowTop = (canvasH - windowSize) / 2f - canvasH * 0.06f
+            val cornerRadius = 24f
+
+            // Draw full semi-transparent overlay
+            drawRect(color = Color.Black.copy(alpha = 0.45f))
+
+            // Cut out the scanner window (clear rectangle)
+            drawRoundRect(
+                color = Color.Transparent,
+                topLeft = Offset(windowLeft, windowTop),
+                size = Size(windowSize, windowSize),
+                cornerRadius = CornerRadius(cornerRadius, cornerRadius),
+                blendMode = BlendMode.Clear
             )
+
+            // Draw corner brackets
+            val bracketLen = windowSize * 0.18f
+            val strokeW = 5.dp.toPx()
+
+            // Top-left corner
+            val tlPath = Path().apply {
+                moveTo(windowLeft, windowTop + bracketLen)
+                lineTo(windowLeft, windowTop + cornerRadius)
+                quadraticBezierTo(windowLeft, windowTop, windowLeft + cornerRadius, windowTop)
+                lineTo(windowLeft + bracketLen, windowTop)
+            }
+            drawPath(tlPath, color = accentGreen, style = Stroke(width = strokeW, cap = StrokeCap.Round))
+
+            // Top-right corner
+            val trPath = Path().apply {
+                moveTo(windowLeft + windowSize - bracketLen, windowTop)
+                lineTo(windowLeft + windowSize - cornerRadius, windowTop)
+                quadraticBezierTo(windowLeft + windowSize, windowTop, windowLeft + windowSize, windowTop + cornerRadius)
+                lineTo(windowLeft + windowSize, windowTop + bracketLen)
+            }
+            drawPath(trPath, color = accentGreen, style = Stroke(width = strokeW, cap = StrokeCap.Round))
+
+            // Bottom-left corner
+            val blPath = Path().apply {
+                moveTo(windowLeft, windowTop + windowSize - bracketLen)
+                lineTo(windowLeft, windowTop + windowSize - cornerRadius)
+                quadraticBezierTo(windowLeft, windowTop + windowSize, windowLeft + cornerRadius, windowTop + windowSize)
+                lineTo(windowLeft + bracketLen, windowTop + windowSize)
+            }
+            drawPath(blPath, color = accentGreen, style = Stroke(width = strokeW, cap = StrokeCap.Round))
+
+            // Bottom-right corner
+            val brPath = Path().apply {
+                moveTo(windowLeft + windowSize - bracketLen, windowTop + windowSize)
+                lineTo(windowLeft + windowSize - cornerRadius, windowTop + windowSize)
+                quadraticBezierTo(windowLeft + windowSize, windowTop + windowSize, windowLeft + windowSize, windowTop + windowSize - cornerRadius)
+                lineTo(windowLeft + windowSize, windowTop + windowSize - bracketLen)
+            }
+            drawPath(brPath, color = accentGreen, style = Stroke(width = strokeW, cap = StrokeCap.Round))
+        }
+
+        // Text and Gallery button — positioned below the scanner window
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(bottom = 32.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Bottom
+        ) {
+            Text(
+                text = "Scan any UPI QR code",
+                color = Color.White,
+                fontSize = 16.sp,
+                fontWeight = FontWeight.Medium
+            )
+            
+            Spacer(modifier = Modifier.height(20.dp))
+            
+            // "Scan from photo" pill button
+            Row(
+                modifier = Modifier
+                    .background(
+                        Color.White.copy(alpha = 0.15f),
+                        shape = RoundedCornerShape(24.dp)
+                    )
+                    .clickable(onClick = onGalleryClick)
+                    .padding(horizontal = 20.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.Center
+            ) {
+                Icon(
+                    painter = galleryPainter,
+                    contentDescription = "Gallery",
+                    tint = Color.White,
+                    modifier = Modifier.size(20.dp)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = "Scan from photo",
+                    color = Color.White,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Medium
+                )
+            }
+        }
+
+        // Processing overlay
+        if (isProcessing) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.6f)),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = "Processing Payment...",
+                    color = Color.White,
+                    fontSize = 20.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
         }
     }
 }
