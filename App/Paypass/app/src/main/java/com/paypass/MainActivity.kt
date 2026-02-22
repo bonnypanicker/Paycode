@@ -53,6 +53,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.util.concurrent.Executors
 import android.widget.Toast
 import androidx.datastore.core.DataStore
@@ -60,16 +62,11 @@ import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
-
-import androidx.navigation.compose.NavHost
-import androidx.navigation.compose.composable
-import androidx.navigation.compose.rememberNavController
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.RadioButton
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.graphics.vector.path
 
 // Extension property for DataStore
 val Context.dataStore: DataStore<Preferences> by preferencesDataStore(name = "settings")
@@ -83,18 +80,16 @@ class MainActivity : ComponentActivity() {
                     modifier = Modifier.fillMaxSize(),
                     color = Color.Black
                 ) {
-                    val navController = rememberNavController()
-                    NavHost(navController = navController, startDestination = "scanner") {
-                        composable("scanner") {
-                            PaypassScreen(
-                                onNavigateToSettings = { navController.navigate("settings") }
-                            )
-                        }
-                        composable("settings") {
-                            SettingsScreen(
-                                onNavigateBack = { navController.popBackStack() }
-                            )
-                        }
+                    // Zero-overhead state-based screen switching (no NavHost)
+                    var currentScreen by remember { mutableStateOf("scanner") }
+                    
+                    when (currentScreen) {
+                        "scanner" -> PaypassScreen(
+                            onNavigateToSettings = { currentScreen = "settings" }
+                        )
+                        "settings" -> SettingsScreen(
+                            onNavigateBack = { currentScreen = "scanner" }
+                        )
                     }
                 }
             }
@@ -124,44 +119,48 @@ fun PaypassScreen(onNavigateToSettings: () -> Unit) {
     
     val SELECTED_APP_KEY = stringPreferencesKey("selected_upi_app")
 
-    val upiApps = remember {
-        val intent = Intent(Intent.ACTION_VIEW).apply {
-            data = Uri.parse("upi://pay?pa=test@upi&pn=Test&am=1.00&cu=INR")
-        }
-        val flags = PackageManager.MATCH_DEFAULT_ONLY
-        val resolveInfos: List<ResolveInfo> = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
-            pm.queryIntentActivities(intent, PackageManager.ResolveInfoFlags.of(flags.toLong()))
-        } else {
-            @Suppress("DEPRECATION")
-            pm.queryIntentActivities(intent, flags)
-        }
-        
-        val apps = resolveInfos.map {
-            UpiAppInfo(
-                packageName = it.activityInfo.packageName,
-                appName = it.loadLabel(pm).toString(),
-                icon = it.loadIcon(pm)
-            )
-        }.distinctBy { it.packageName }
-        
-        apps
-    }
-    
-    // Load selected app and check Selection Mode from DataStore
+    // Async state for UPI apps (populated off main thread)
+    var upiApps by remember { mutableStateOf<List<UpiAppInfo>>(emptyList()) }
+
+    // Load UPI apps AND DataStore preferences in parallel on IO thread
     LaunchedEffect(Unit) {
-        val prefs = context.dataStore.data.first()
-        val savedPackage = prefs[SELECTED_APP_KEY]
-        val selectionMode = prefs[SELECTION_MODE_KEY] ?: MODE_REMEMBER_LAST // Default is remember
+        // Run both on IO dispatcher to keep UI thread free for camera
+        val apps = withContext(Dispatchers.IO) {
+            val intent = Intent(Intent.ACTION_VIEW).apply {
+                data = Uri.parse("upi://pay?pa=test@upi&pn=Test&am=1.00&cu=INR")
+            }
+            val flags = PackageManager.MATCH_DEFAULT_ONLY
+            val resolveInfos: List<ResolveInfo> = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+                pm.queryIntentActivities(intent, PackageManager.ResolveInfoFlags.of(flags.toLong()))
+            } else {
+                @Suppress("DEPRECATION")
+                pm.queryIntentActivities(intent, flags)
+            }
+            
+            resolveInfos.map {
+                UpiAppInfo(
+                    packageName = it.activityInfo.packageName,
+                    appName = it.loadLabel(pm).toString(),
+                    icon = it.loadIcon(pm)
+                )
+            }.distinctBy { it.packageName }
+        }
+        upiApps = apps
         
-        if (selectionMode == MODE_FIXED_DEFAULT && savedPackage != null && upiApps.any { it.packageName == savedPackage }) {
-            // Unconditionally force the fixed app
+        // Read DataStore preferences on IO thread
+        val prefs = withContext(Dispatchers.IO) {
+            context.dataStore.data.first()
+        }
+        val savedPackage = prefs[SELECTED_APP_KEY]
+        val selectionMode = prefs[SELECTION_MODE_KEY] ?: MODE_REMEMBER_LAST
+        
+        if (selectionMode == MODE_FIXED_DEFAULT && savedPackage != null && apps.any { it.packageName == savedPackage }) {
             selectedAppPackage = savedPackage
         } else {
-            // Otherwise, fall back to whatever was saved (or first app if empty)
-            if (savedPackage != null && upiApps.any { it.packageName == savedPackage }) {
+            if (savedPackage != null && apps.any { it.packageName == savedPackage }) {
                 selectedAppPackage = savedPackage
-            } else if (upiApps.isNotEmpty()) {
-                selectedAppPackage = upiApps.first().packageName
+            } else if (apps.isNotEmpty()) {
+                selectedAppPackage = apps.first().packageName
             }
         }
     }
@@ -258,25 +257,20 @@ fun PaypassScreen(onNavigateToSettings: () -> Unit) {
                 }
             }
             
-            // Settings Icon Overlay
-            Box(
+            // Settings Icon Overlay (static, no recomposition needed)
+            IconButton(
+                onClick = onNavigateToSettings,
                 modifier = Modifier
-                    .fillMaxSize()
-                    .padding(16.dp),
-                contentAlignment = Alignment.TopEnd
+                    .align(Alignment.TopEnd)
+                    .padding(16.dp)
+                    .size(48.dp)
+                    .background(Color.Black.copy(alpha = 0.4f), shape = CircleShape)
             ) {
-                IconButton(
-                    onClick = onNavigateToSettings,
-                    modifier = Modifier
-                        .size(48.dp)
-                        .background(Color.Black.copy(alpha = 0.4f), shape = CircleShape)
-                ) {
-                    Icon(
-                        imageVector = Icons.Filled.Settings,
-                        contentDescription = "Settings",
-                        tint = Color.White
-                    )
-                }
+                Icon(
+                    imageVector = SettingsIcon,
+                    contentDescription = "Settings",
+                    tint = Color.White
+                )
             }
         }
         
@@ -529,7 +523,7 @@ fun SettingsScreen(onNavigateBack: () -> Unit) {
         ) {
             IconButton(onClick = onNavigateBack) {
                 Icon(
-                    imageVector = Icons.Filled.ArrowBack,
+                    imageVector = ArrowBackIcon,
                     contentDescription = "Back",
                     tint = Color.White
                 )
@@ -622,4 +616,88 @@ fun SettingsScreen(onNavigateBack: () -> Unit) {
             }
         }
     }
+}
+
+// Inline vector icons (replaces material-icons-extended to avoid classloader jank)
+val SettingsIcon: ImageVector by lazy {
+    ImageVector.Builder(
+        name = "Settings",
+        defaultWidth = 24.dp,
+        defaultHeight = 24.dp,
+        viewportWidth = 24f,
+        viewportHeight = 24f
+    ).apply {
+        path(fill = androidx.compose.ui.graphics.SolidColor(Color.White)) {
+            moveTo(19.14f, 12.94f)
+            curveToRelative(0.04f, -0.3f, 0.06f, -0.61f, 0.06f, -0.94f)
+            curveToRelative(0f, -0.32f, -0.02f, -0.64f, -0.07f, -0.94f)
+            lineToRelative(2.03f, -1.58f)
+            curveToRelative(0.18f, -0.14f, 0.23f, -0.41f, 0.12f, -0.61f)
+            lineToRelative(-1.92f, -3.32f)
+            curveToRelative(-0.12f, -0.22f, -0.37f, -0.29f, -0.59f, -0.22f)
+            lineToRelative(-2.39f, 0.96f)
+            curveToRelative(-0.5f, -0.38f, -1.03f, -0.7f, -1.62f, -0.94f)
+            lineToRelative(-0.36f, -2.54f)
+            curveToRelative(-0.04f, -0.24f, -0.24f, -0.41f, -0.48f, -0.41f)
+            horizontalLineToRelative(-3.84f)
+            curveToRelative(-0.24f, 0f, -0.43f, 0.17f, -0.47f, 0.41f)
+            lineToRelative(-0.36f, 2.54f)
+            curveToRelative(-0.59f, 0.24f, -1.13f, 0.57f, -1.62f, 0.94f)
+            lineToRelative(-2.39f, -0.96f)
+            curveToRelative(-0.22f, -0.08f, -0.47f, 0f, -0.59f, 0.22f)
+            lineToRelative(-1.92f, 3.32f)
+            curveToRelative(-0.12f, 0.22f, -0.07f, 0.47f, 0.12f, 0.61f)
+            lineToRelative(2.03f, 1.58f)
+            curveToRelative(-0.05f, 0.3f, -0.09f, 0.63f, -0.09f, 0.94f)
+            curveToRelative(0f, 0.31f, 0.02f, 0.64f, 0.07f, 0.94f)
+            lineToRelative(-2.03f, 1.58f)
+            curveToRelative(-0.18f, 0.14f, -0.23f, 0.41f, -0.12f, 0.61f)
+            lineToRelative(1.92f, 3.32f)
+            curveToRelative(0.12f, 0.22f, 0.37f, 0.29f, 0.59f, 0.22f)
+            lineToRelative(2.39f, -0.96f)
+            curveToRelative(0.5f, 0.38f, 1.03f, 0.7f, 1.62f, 0.94f)
+            lineToRelative(0.36f, 2.54f)
+            curveToRelative(0.05f, 0.24f, 0.24f, 0.41f, 0.48f, 0.41f)
+            horizontalLineToRelative(3.84f)
+            curveToRelative(0.24f, 0f, 0.44f, -0.17f, 0.47f, -0.41f)
+            lineToRelative(0.36f, -2.54f)
+            curveToRelative(0.59f, -0.24f, 1.13f, -0.56f, 1.62f, -0.94f)
+            lineToRelative(2.39f, 0.96f)
+            curveToRelative(0.22f, 0.08f, 0.47f, 0f, 0.59f, -0.22f)
+            lineToRelative(1.92f, -3.32f)
+            curveToRelative(0.12f, -0.22f, 0.07f, -0.47f, -0.12f, -0.61f)
+            lineToRelative(-2.01f, -1.58f)
+            close()
+            moveTo(12f, 15.6f)
+            curveToRelative(-1.98f, 0f, -3.6f, -1.62f, -3.6f, -3.6f)
+            curveToRelative(0f, -1.98f, 1.62f, -3.6f, 3.6f, -3.6f)
+            curveToRelative(1.98f, 0f, 3.6f, 1.62f, 3.6f, 3.6f)
+            curveToRelative(0f, 1.98f, -1.62f, 3.6f, -3.6f, 3.6f)
+            close()
+        }
+    }.build()
+}
+
+val ArrowBackIcon: ImageVector by lazy {
+    ImageVector.Builder(
+        name = "ArrowBack",
+        defaultWidth = 24.dp,
+        defaultHeight = 24.dp,
+        viewportWidth = 24f,
+        viewportHeight = 24f
+    ).apply {
+        path(fill = androidx.compose.ui.graphics.SolidColor(Color.White)) {
+            moveTo(20f, 11f)
+            horizontalLineTo(7.83f)
+            lineToRelative(5.59f, -5.59f)
+            lineTo(12f, 4f)
+            lineToRelative(-8f, 8f)
+            lineToRelative(8f, 8f)
+            lineToRelative(1.41f, -1.41f)
+            lineTo(7.83f, 13f)
+            horizontalLineTo(20f)
+            verticalLineToRelative(-2f)
+            close()
+        }
+    }.build()
 }
