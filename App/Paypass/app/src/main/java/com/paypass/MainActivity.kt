@@ -288,6 +288,12 @@ fun PaypassScreen(onNavigateToSettings: () -> Unit) {
                         lastScannedUpi = null
                     }
                 )
+                
+                // Scanner Frame Overlay — only when camera is active
+                ScannerFrameOverlay(
+                    onGalleryClick = { galleryLauncher.launch("image/*") },
+                    isProcessing = isScanningLocked && lastScannedUpi != null
+                )
             } else {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     Text(
@@ -303,13 +309,7 @@ fun PaypassScreen(onNavigateToSettings: () -> Unit) {
                 }
             }
             
-            // Scanner Frame Overlay
-            ScannerFrameOverlay(
-                onGalleryClick = { galleryLauncher.launch("image/*") },
-                isProcessing = isScanningLocked && lastScannedUpi != null
-            )
-            
-            // Settings icon at top-right
+            // Settings icon at top-right (always visible)
             SettingsIconButton(onClick = onNavigateToSettings)
         }
         
@@ -536,18 +536,19 @@ fun ScannerFrameOverlay(onGalleryClick: () -> Unit, isProcessing: Boolean) {
     val accentGreen = Color(0xFF00E676) // Accented green
     val galleryPainter = painterResource(id = R.drawable.ic_gallery)
 
-    Box(modifier = Modifier.fillMaxSize()) {
+    BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+        val boxW = constraints.maxWidth.toFloat()
+        val boxH = constraints.maxHeight.toFloat()
+        
+        // Scanner window dimensions — shifted toward the top
+        val windowSize = boxW * 0.72f
+        val windowLeft = (boxW - windowSize) / 2f
+        val windowTop = boxH * 0.08f  // 8% from top — much higher
+        val windowBottom = windowTop + windowSize
+        val cornerRadius = 24f
+
         // Dark overlay with clear window cutout
         Canvas(modifier = Modifier.fillMaxSize().graphicsLayer(alpha = 0.99f)) {
-            val canvasW = size.width
-            val canvasH = size.height
-
-            // Scanner window: big, centered
-            val windowSize = canvasW * 0.72f
-            val windowLeft = (canvasW - windowSize) / 2f
-            val windowTop = (canvasH - windowSize) / 2f - canvasH * 0.06f
-            val cornerRadius = 24f
-
             // Draw full semi-transparent overlay
             drawRect(color = Color.Black.copy(alpha = 0.45f))
 
@@ -601,13 +602,15 @@ fun ScannerFrameOverlay(onGalleryClick: () -> Unit, isProcessing: Boolean) {
             drawPath(brPath, color = accentGreen, style = Stroke(width = strokeW, cap = StrokeCap.Round))
         }
 
-        // Text and Gallery button — positioned below the scanner window
+        // Text and Gallery button — positioned just below the scanner window
+        val density = androidx.compose.ui.platform.LocalDensity.current
+        val topOffsetDp = with(density) { windowBottom.toDp() + 16.dp }
+
         Column(
             modifier = Modifier
-                .fillMaxSize()
-                .padding(bottom = 32.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Bottom
+                .fillMaxWidth()
+                .padding(top = topOffsetDp),
+            horizontalAlignment = Alignment.CenterHorizontally
         ) {
             Text(
                 text = "Scan any UPI QR code",
