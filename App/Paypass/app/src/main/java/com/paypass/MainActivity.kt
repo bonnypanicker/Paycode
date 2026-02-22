@@ -61,6 +61,16 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 
+import androidx.navigation.compose.NavHost
+import androidx.navigation.compose.composable
+import androidx.navigation.compose.rememberNavController
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.RadioButton
+
 // Extension property for DataStore
 val Context.dataStore: DataStore<Preferences> by preferencesDataStore(name = "settings")
 
@@ -73,7 +83,19 @@ class MainActivity : ComponentActivity() {
                     modifier = Modifier.fillMaxSize(),
                     color = Color.Black
                 ) {
-                    PaypassScreen()
+                    val navController = rememberNavController()
+                    NavHost(navController = navController, startDestination = "scanner") {
+                        composable("scanner") {
+                            PaypassScreen(
+                                onNavigateToSettings = { navController.navigate("settings") }
+                            )
+                        }
+                        composable("settings") {
+                            SettingsScreen(
+                                onNavigateBack = { navController.popBackStack() }
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -88,7 +110,7 @@ data class UpiAppInfo(
 
 @OptIn(ExperimentalPermissionsApi::class)
 @Composable
-fun PaypassScreen() {
+fun PaypassScreen(onNavigateToSettings: () -> Unit) {
     val context = LocalContext.current
     val pm = context.packageManager
     val scope = rememberCoroutineScope()
@@ -125,16 +147,22 @@ fun PaypassScreen() {
         apps
     }
     
-    // Load previously selected app from DataStore
+    // Load selected app and check Selection Mode from DataStore
     LaunchedEffect(Unit) {
-        val savedPackage = context.dataStore.data.map { preferences ->
-            preferences[SELECTED_APP_KEY]
-        }.first()
+        val prefs = context.dataStore.data.first()
+        val savedPackage = prefs[SELECTED_APP_KEY]
+        val selectionMode = prefs[SELECTION_MODE_KEY] ?: MODE_REMEMBER_LAST // Default is remember
         
-        if (savedPackage != null && upiApps.any { it.packageName == savedPackage }) {
+        if (selectionMode == MODE_FIXED_DEFAULT && savedPackage != null && upiApps.any { it.packageName == savedPackage }) {
+            // Unconditionally force the fixed app
             selectedAppPackage = savedPackage
-        } else if (upiApps.isNotEmpty()) {
-            selectedAppPackage = upiApps.first().packageName
+        } else {
+            // Otherwise, fall back to whatever was saved (or first app if empty)
+            if (savedPackage != null && upiApps.any { it.packageName == savedPackage }) {
+                selectedAppPackage = savedPackage
+            } else if (upiApps.isNotEmpty()) {
+                selectedAppPackage = upiApps.first().packageName
+            }
         }
     }
 
@@ -229,6 +257,27 @@ fun PaypassScreen() {
                     )
                 }
             }
+            
+            // Settings Icon Overlay
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(16.dp),
+                contentAlignment = Alignment.TopEnd
+            ) {
+                IconButton(
+                    onClick = onNavigateToSettings,
+                    modifier = Modifier
+                        .size(48.dp)
+                        .background(Color.Black.copy(alpha = 0.4f), shape = CircleShape)
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.Settings,
+                        contentDescription = "Settings",
+                        tint = Color.White
+                    )
+                }
+            }
         }
         
         // Bottom 20%: App Selection Strip
@@ -259,10 +308,14 @@ fun PaypassScreen() {
                             onClick = {
                                 if (!isScanningLocked) {
                                     selectedAppPackage = appInfo.packageName
-                                    // Save the new selection
+                                    // Save the new selection only if in Remember Last mode
                                     scope.launch {
-                                        context.dataStore.edit { preferences ->
-                                            preferences[SELECTED_APP_KEY] = appInfo.packageName
+                                        val prefs = context.dataStore.data.first()
+                                        val mode = prefs[SELECTION_MODE_KEY] ?: MODE_REMEMBER_LAST
+                                        if (mode == MODE_REMEMBER_LAST) {
+                                            context.dataStore.edit { preferences ->
+                                                preferences[SELECTED_APP_KEY] = appInfo.packageName
+                                            }
                                         }
                                     }
                                 }
@@ -416,5 +469,157 @@ fun UpiAppItem(appInfo: UpiAppInfo, isSelected: Boolean, onClick: () -> Unit) {
             maxLines = 1,
             overflow = TextOverflow.Ellipsis
         )
+    }
+}
+
+val SELECTION_MODE_KEY = stringPreferencesKey("selection_mode")
+const val MODE_REMEMBER_LAST = "REMEMBER_LAST"
+const val MODE_FIXED_DEFAULT = "FIXED_DEFAULT"
+
+@Composable
+fun SettingsScreen(onNavigateBack: () -> Unit) {
+    val context = LocalContext.current
+    val pm = context.packageManager
+    val scope = rememberCoroutineScope()
+    
+    // We fetch the apps again here strictly offline, no CameraX impact
+    val upiApps = remember {
+        val intent = Intent(Intent.ACTION_VIEW).apply {
+            data = Uri.parse("upi://pay?pa=test@upi&pn=Test&am=1.00&cu=INR")
+        }
+        val flags = PackageManager.MATCH_DEFAULT_ONLY
+        val resolveInfos: List<ResolveInfo> = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+            pm.queryIntentActivities(intent, PackageManager.ResolveInfoFlags.of(flags.toLong()))
+        } else {
+            @Suppress("DEPRECATION")
+            pm.queryIntentActivities(intent, flags)
+        }
+        
+        resolveInfos.map {
+            UpiAppInfo(
+                packageName = it.activityInfo.packageName,
+                appName = it.loadLabel(pm).toString(),
+                icon = it.loadIcon(pm)
+            )
+        }.distinctBy { it.packageName }
+    }
+
+    var selectionMode by remember { mutableStateOf(MODE_REMEMBER_LAST) }
+    var fixedDefaultPackage by remember { mutableStateOf<String?>(null) }
+    
+    val SELECTED_APP_KEY = stringPreferencesKey("selected_upi_app")
+
+    // Load current settings
+    LaunchedEffect(Unit) {
+        val prefs = context.dataStore.data.first()
+        selectionMode = prefs[SELECTION_MODE_KEY] ?: MODE_REMEMBER_LAST
+        fixedDefaultPackage = prefs[SELECTED_APP_KEY]
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color(0xFF121212))
+            .padding(16.dp)
+    ) {
+        // App Bar
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            IconButton(onClick = onNavigateBack) {
+                Icon(
+                    imageVector = Icons.Filled.ArrowBack,
+                    contentDescription = "Back",
+                    tint = Color.White
+                )
+            }
+            Text(
+                text = "Settings",
+                color = Color.White,
+                fontSize = 24.sp,
+                modifier = Modifier.padding(start = 16.dp)
+            )
+        }
+        
+        Spacer(modifier = Modifier.height(32.dp))
+        
+        Text("App Selection Behavior", color = Color.Gray, fontSize = 14.sp)
+        Spacer(modifier = Modifier.height(16.dp))
+        
+        // Option 1: Remember Last
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable {
+                    selectionMode = MODE_REMEMBER_LAST
+                    scope.launch {
+                        context.dataStore.edit { it[SELECTION_MODE_KEY] = MODE_REMEMBER_LAST }
+                    }
+                }
+                .padding(vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            RadioButton(
+                selected = selectionMode == MODE_REMEMBER_LAST,
+                onClick = null
+            )
+            Spacer(modifier = Modifier.width(16.dp))
+            Column {
+                Text("Remember Last Used", color = Color.White, fontSize = 16.sp)
+                Text("App opens with whatever you used last time", color = Color.Gray, fontSize = 12.sp)
+            }
+        }
+        
+        // Option 2: Fixed Default
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable {
+                    selectionMode = MODE_FIXED_DEFAULT
+                    scope.launch {
+                        context.dataStore.edit { it[SELECTION_MODE_KEY] = MODE_FIXED_DEFAULT }
+                    }
+                }
+                .padding(vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            RadioButton(
+                selected = selectionMode == MODE_FIXED_DEFAULT,
+                onClick = null
+            )
+            Spacer(modifier = Modifier.width(16.dp))
+            Column {
+                Text("Force Fixed Default", color = Color.White, fontSize = 16.sp)
+                Text("Always launch specific app, regardless of last use", color = Color.Gray, fontSize = 12.sp)
+            }
+        }
+        
+        // Dropdown for fixed default
+        if (selectionMode == MODE_FIXED_DEFAULT) {
+            Spacer(modifier = Modifier.height(16.dp))
+            Text("Select Fixed App:", color = Color.Gray, fontSize = 14.sp, modifier = Modifier.padding(start = 48.dp))
+            Spacer(modifier = Modifier.height(8.dp))
+            
+            // Reusing UpiAppItem in a Row for selection
+            LazyRow(
+                contentPadding = PaddingValues(start = 48.dp, end = 16.dp),
+                horizontalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
+                items(upiApps) { appInfo ->
+                    val isSelected = appInfo.packageName == fixedDefaultPackage
+                    UpiAppItem(
+                        appInfo = appInfo,
+                        isSelected = isSelected,
+                        onClick = {
+                            fixedDefaultPackage = appInfo.packageName
+                            scope.launch {
+                                context.dataStore.edit { it[SELECTED_APP_KEY] = appInfo.packageName }
+                            }
+                        }
+                    )
+                }
+            }
+        }
     }
 }
