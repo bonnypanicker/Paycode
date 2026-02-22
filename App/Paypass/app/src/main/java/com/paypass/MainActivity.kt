@@ -68,6 +68,8 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.RadioButton
 import androidx.compose.ui.res.painterResource
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 
 // Extension property for DataStore
 val Context.dataStore: DataStore<Preferences> by preferencesDataStore(name = "settings")
@@ -145,6 +147,85 @@ fun PaypassScreen(onNavigateToSettings: () -> Unit) {
         apps
     }
     
+    // Reusable UPI handoff logic
+    val handleUpiContent: (String) -> Unit = { qrContent ->
+        if (!isScanningLocked) {
+            if (qrContent.startsWith("upi://")) {
+                isScanningLocked = true
+                val sanitizedUri = try {
+                    val parsed = Uri.parse(qrContent)
+                    val builder = Uri.Builder()
+                        .scheme(parsed.scheme)
+                        .authority(parsed.authority)
+                        .path(parsed.path)
+                    parsed.queryParameterNames.forEach { key ->
+                        parsed.getQueryParameter(key)?.let { value ->
+                            builder.appendQueryParameter(key, value)
+                        }
+                    }
+                    builder.build()
+                } catch (e: Exception) {
+                    Uri.parse(qrContent)
+                }
+                lastScannedUpi = sanitizedUri.toString()
+                Log.d("Paypass", "Scanned UPI: $sanitizedUri")
+                selectedAppPackage?.let { targetPackage ->
+                    try {
+                        val launchIntent = Intent(Intent.ACTION_VIEW).apply {
+                            data = sanitizedUri
+                            setPackage(targetPackage)
+                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        }
+                        context.startActivity(launchIntent)
+                    } catch (e: Exception) {
+                        Log.e("Paypass", "Failed to launch app: $targetPackage", e)
+                        displayErrorToast = "Failed to launch $targetPackage. Try another app."
+                        isScanningLocked = false
+                    }
+                } ?: run {
+                    displayErrorToast = "No UPI app selected"
+                }
+            } else {
+                isScanningLocked = true
+                displayErrorToast = "Not a UPI QR code!"
+            }
+        }
+    }
+
+    // Gallery image picker — processes picked image through ML Kit
+    val galleryLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri: Uri? ->
+        uri?.let { imageUri ->
+            try {
+                val image = InputImage.fromFilePath(context, imageUri)
+                val options = BarcodeScannerOptions.Builder()
+                    .setBarcodeFormats(Barcode.FORMAT_QR_CODE)
+                    .build()
+                val scanner = BarcodeScanning.getClient(options)
+                scanner.process(image)
+                    .addOnSuccessListener { barcodes ->
+                        if (barcodes.isNotEmpty()) {
+                            barcodes.firstOrNull()?.rawValue?.let { value ->
+                                handleUpiContent(value)
+                            } ?: run {
+                                displayErrorToast = "Could not read QR code from image"
+                            }
+                        } else {
+                            displayErrorToast = "No QR code found in image"
+                        }
+                    }
+                    .addOnFailureListener {
+                        Log.e("Paypass", "Gallery barcode scan failed", it)
+                        displayErrorToast = "Failed to scan image"
+                    }
+            } catch (e: Exception) {
+                Log.e("Paypass", "Failed to load image", e)
+                displayErrorToast = "Failed to load image"
+            }
+        }
+    }
+    
     // Load selected app and check Selection Mode from DataStore
     LaunchedEffect(Unit) {
         val prefs = context.dataStore.data.first()
@@ -152,10 +233,8 @@ fun PaypassScreen(onNavigateToSettings: () -> Unit) {
         val selectionMode = prefs[SELECTION_MODE_KEY] ?: MODE_REMEMBER_LAST // Default is remember
         
         if (selectionMode == MODE_FIXED_DEFAULT && savedPackage != null && upiApps.any { it.packageName == savedPackage }) {
-            // Unconditionally force the fixed app
             selectedAppPackage = savedPackage
         } else {
-            // Otherwise, fall back to whatever was saved (or first app if empty)
             if (savedPackage != null && upiApps.any { it.packageName == savedPackage }) {
                 selectedAppPackage = savedPackage
             } else if (upiApps.isNotEmpty()) {
@@ -191,58 +270,7 @@ fun PaypassScreen(onNavigateToSettings: () -> Unit) {
         ) {
             if (cameraPermissionState.status.isGranted) {
                 CameraPreviewScreen(
-                    onQrCodeScanned = { qrContent ->
-                        if (!isScanningLocked) {
-                            if (qrContent.startsWith("upi://")) {
-                                isScanningLocked = true
-                                
-                                // Sanitize the UPI URI: ensure proper encoding
-                                // Some QR codes embed double-encoded or malformed URIs
-                                val sanitizedUri = try {
-                                    val parsed = Uri.parse(qrContent)
-                                    // Rebuild URI to fix encoding issues
-                                    val builder = Uri.Builder()
-                                        .scheme(parsed.scheme)
-                                        .authority(parsed.authority)
-                                        .path(parsed.path)
-                                    // Re-add all query parameters cleanly
-                                    parsed.queryParameterNames.forEach { key ->
-                                        parsed.getQueryParameter(key)?.let { value ->
-                                            builder.appendQueryParameter(key, value)
-                                        }
-                                    }
-                                    builder.build()
-                                } catch (e: Exception) {
-                                    // Fallback to raw parse if rebuild fails
-                                    Uri.parse(qrContent)
-                                }
-                                
-                                lastScannedUpi = sanitizedUri.toString()
-                                Log.d("Paypass", "Scanned UPI: $sanitizedUri")
-                                
-                                selectedAppPackage?.let { targetPackage ->
-                                    try {
-                                        val launchIntent = Intent(Intent.ACTION_VIEW).apply {
-                                            data = sanitizedUri
-                                            setPackage(targetPackage)
-                                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                                        }
-                                        context.startActivity(launchIntent)
-                                    } catch (e: Exception) {
-                                        Log.e("Paypass", "Failed to launch app: $targetPackage", e)
-                                        displayErrorToast = "Failed to launch ${targetPackage}. Try another app."
-                                        isScanningLocked = false
-                                    }
-                                } ?: run {
-                                    displayErrorToast = "No UPI app selected"
-                                }
-                            } else {
-                                // Error handling: Scanned a non-upi QR code
-                                isScanningLocked = true // lock briefly to avoid spamming toasts
-                                displayErrorToast = "Not a UPI QR code!"
-                            }
-                        }
-                    },
+                    onQrCodeScanned = { qrContent -> handleUpiContent(qrContent) },
                     onQrCodeLost = {
                         // Move-Away Reset: Unlock the UI when QR code leaves the frame
                         isScanningLocked = false
@@ -279,8 +307,9 @@ fun PaypassScreen(onNavigateToSettings: () -> Unit) {
                 }
             }
             
-            // Settings Icon Overlay — extracted into a stable composable
+            // Icon Overlays — extracted into stable composables
             SettingsIconButton(onClick = onNavigateToSettings)
+            GalleryIconButton(onClick = { galleryLauncher.launch("image/*") })
         }
         
         // Bottom 20%: App Selection Strip
@@ -494,6 +523,31 @@ fun SettingsIconButton(onClick: () -> Unit) {
             Icon(
                 painter = settingsPainter,
                 contentDescription = "Settings",
+                tint = Color.White
+            )
+        }
+    }
+}
+
+// Extracted into its own composable to prevent recomposition from affecting CameraX
+@Composable
+fun GalleryIconButton(onClick: () -> Unit) {
+    val galleryPainter = painterResource(id = R.drawable.ic_gallery)
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(16.dp),
+        contentAlignment = Alignment.TopStart
+    ) {
+        IconButton(
+            onClick = onClick,
+            modifier = Modifier
+                .size(48.dp)
+                .background(Color.Black.copy(alpha = 0.4f), shape = CircleShape)
+        ) {
+            Icon(
+                painter = galleryPainter,
+                contentDescription = "Upload from Gallery",
                 tint = Color.White
             )
         }
