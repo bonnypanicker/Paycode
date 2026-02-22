@@ -195,12 +195,35 @@ fun PaypassScreen(onNavigateToSettings: () -> Unit) {
                         if (!isScanningLocked) {
                             if (qrContent.startsWith("upi://")) {
                                 isScanningLocked = true
-                                lastScannedUpi = qrContent
+                                
+                                // Sanitize the UPI URI: ensure proper encoding
+                                // Some QR codes embed double-encoded or malformed URIs
+                                val sanitizedUri = try {
+                                    val parsed = Uri.parse(qrContent)
+                                    // Rebuild URI to fix encoding issues
+                                    val builder = Uri.Builder()
+                                        .scheme(parsed.scheme)
+                                        .authority(parsed.authority)
+                                        .path(parsed.path)
+                                    // Re-add all query parameters cleanly
+                                    parsed.queryParameterNames.forEach { key ->
+                                        parsed.getQueryParameter(key)?.let { value ->
+                                            builder.appendQueryParameter(key, value)
+                                        }
+                                    }
+                                    builder.build()
+                                } catch (e: Exception) {
+                                    // Fallback to raw parse if rebuild fails
+                                    Uri.parse(qrContent)
+                                }
+                                
+                                lastScannedUpi = sanitizedUri.toString()
+                                Log.d("Paypass", "Scanned UPI: $sanitizedUri")
                                 
                                 selectedAppPackage?.let { targetPackage ->
                                     try {
                                         val launchIntent = Intent(Intent.ACTION_VIEW).apply {
-                                            data = Uri.parse(qrContent)
+                                            data = sanitizedUri
                                             setPackage(targetPackage)
                                             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                                         }
