@@ -163,20 +163,13 @@ fun PaypassScreen(onNavigateToSettings: () -> Unit) {
         if (!isScanningLocked) {
             if (qrContent.startsWith("upi://")) {
                 isScanningLocked = true
-                val sanitizedUri = try {
-                    val parsed = Uri.parse(qrContent)
-                    val builder = Uri.Builder()
-                        .scheme(parsed.scheme)
-                        .authority(parsed.authority)
-                        .path(parsed.path)
-                    parsed.queryParameterNames.forEach { key ->
-                        parsed.getQueryParameter(key)?.let { value ->
-                            builder.appendQueryParameter(key, value)
-                        }
-                    }
-                    builder.build()
-                } catch (e: Exception) {
-                    Uri.parse(qrContent)
+                val parsedUri = Uri.parse(qrContent)
+                val sanitizedUri = if (!parsedUri.queryParameterNames.contains("cu")) {
+                    parsedUri.buildUpon()
+                        .appendQueryParameter("cu", "INR")
+                        .build()
+                } else {
+                    parsedUri
                 }
                 lastScannedUpi = sanitizedUri.toString()
                 Log.d("Paypass", "Scanned UPI: $sanitizedUri")
