@@ -137,7 +137,7 @@ fun PaypassScreen(onNavigateToSettings: () -> Unit) {
 
     val upiApps = remember {
         val intent = Intent(Intent.ACTION_VIEW).apply {
-            data = Uri.parse("upi://pay?pa=test@upi&pn=Test&am=1.00&cu=INR")
+            data = Uri.parse("upi://pay?pa=test@upi&pn=Test&cu=INR")
         }
         val flags = PackageManager.MATCH_DEFAULT_ONLY
         val resolveInfos: List<ResolveInfo> = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
@@ -163,27 +163,13 @@ fun PaypassScreen(onNavigateToSettings: () -> Unit) {
         if (!isScanningLocked) {
             if (qrContent.startsWith("upi://")) {
                 isScanningLocked = true
-                val sanitizedUri = try {
-                    val parsed = Uri.parse(qrContent)
-                    val builder = Uri.Builder()
-                        .scheme(parsed.scheme)
-                        .authority(parsed.authority)
-                        .path(parsed.path)
-                    parsed.queryParameterNames.forEach { key ->
-                        parsed.getQueryParameter(key)?.let { value ->
-                            builder.appendQueryParameter(key, value)
-                        }
-                    }
-                    builder.build()
-                } catch (e: Exception) {
-                    Uri.parse(qrContent)
-                }
-                lastScannedUpi = sanitizedUri.toString()
-                Log.d("Paypass", "Scanned UPI: $sanitizedUri")
+                val upiUri = Uri.parse(qrContent)
+                lastScannedUpi = qrContent
+                Log.d("Paypass", "Scanned UPI: $upiUri")
                 selectedAppPackage?.let { targetPackage ->
                     try {
                         val launchIntent = Intent(Intent.ACTION_VIEW).apply {
-                            data = sanitizedUri
+                            data = upiUri
                             setPackage(targetPackage)
                             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                         }
@@ -681,7 +667,7 @@ fun SettingsScreen(onNavigateBack: () -> Unit) {
     // We fetch the apps again here strictly offline, no CameraX impact
     val upiApps = remember {
         val intent = Intent(Intent.ACTION_VIEW).apply {
-            data = Uri.parse("upi://pay?pa=test@upi&pn=Test&am=1.00&cu=INR")
+            data = Uri.parse("upi://pay?pa=test@upi&pn=Test&cu=INR")
         }
         val flags = PackageManager.MATCH_DEFAULT_ONLY
         val resolveInfos: List<ResolveInfo> = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {

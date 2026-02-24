@@ -7,6 +7,11 @@
     <queries>
         <intent>
             <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="upi" android:host="pay" />
+        </intent>
+        <!-- Also catch general upi:// -->
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
             <data android:scheme="upi" />
         </intent>
     </queries>
