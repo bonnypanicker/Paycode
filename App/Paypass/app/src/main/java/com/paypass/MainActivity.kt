@@ -160,31 +160,57 @@ fun PaypassScreen(onNavigateToSettings: () -> Unit) {
     
     // Reusable UPI handoff logic
     val handleUpiContent: (String) -> Unit = { qrContent ->
-        if (!isScanningLocked) {
-            if (qrContent.startsWith("upi://")) {
-                isScanningLocked = true
-                val upiUri = Uri.parse(qrContent)
-                lastScannedUpi = qrContent
-                Log.d("Paypass", "Scanned UPI: $upiUri")
-                selectedAppPackage?.let { targetPackage ->
-                    try {
-                        val launchIntent = Intent(Intent.ACTION_VIEW).apply {
-                            data = upiUri
-                            setPackage(targetPackage)
-                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        scope.launch {
+            if (!isScanningLocked) {
+                if (qrContent.startsWith("upi://")) {
+                    isScanningLocked = true
+                    
+                    // Use Uri.Builder for robust parsing and reconstruction
+                    val upiUri = try {
+                        val parsed = Uri.parse(qrContent)
+                        val builder = Uri.Builder()
+                            .scheme(parsed.scheme)
+                            .authority(parsed.authority)
+                        
+                        // We iterate query params to ensure clean encoding
+                        parsed.queryParameterNames.forEach { key ->
+                            parsed.getQueryParameter(key)?.let { value ->
+                                builder.appendQueryParameter(key, value)
+                            }
                         }
-                        context.startActivity(launchIntent)
+                        builder.build()
                     } catch (e: Exception) {
-                        Log.e("Paypass", "Failed to launch app: $targetPackage", e)
-                        displayErrorToast = "Failed to launch $targetPackage. Try another app."
+                        Uri.parse(qrContent)
+                    }
+                    
+                    lastScannedUpi = qrContent
+                    Log.d("Paypass", "Scanned UPI: $upiUri")
+                    selectedAppPackage?.let { targetPackage ->
+                        try {
+                            // Unbind CameraX BEFORE starting activity to free up BufferQueue and prevent WIN DEATH
+                            val cameraProvider = ProcessCameraProvider.getInstance(context).get()
+                            cameraProvider.unbindAll()
+                            
+                            val launchIntent = Intent(Intent.ACTION_VIEW).apply {
+                                data = upiUri
+                                setPackage(targetPackage)
+                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                                putExtra(Intent.EXTRA_REFERRER, Uri.parse("android-app://${context.packageName}"))
+                            }
+                            context.startActivity(launchIntent)
+                        } catch (e: Exception) {
+                            Log.e("Paypass", "Failed to launch app: $targetPackage", e)
+                            displayErrorToast = "Failed to launch $targetPackage. Try another app."
+                            isScanningLocked = false
+                        }
+                    } ?: run {
+                        displayErrorToast = "No UPI app selected"
                         isScanningLocked = false
                     }
-                } ?: run {
-                    displayErrorToast = "No UPI app selected"
+                } else {
+                    isScanningLocked = true
+                    displayErrorToast = "Not a UPI QR code!"
                 }
-            } else {
-                isScanningLocked = true
-                displayErrorToast = "Not a UPI QR code!"
             }
         }
     }
